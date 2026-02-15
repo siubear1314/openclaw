@@ -378,9 +378,17 @@ def generate_next_question(session_id: int, latest_candidate_answer: str) -> str
     state = get_or_create_state(session_id)
     tr = transcript_text(session_id)
     recent_questions = get_recent_interviewer_questions(session_id)
+    resume_text = (state.get("resume_text") or "")[:8000]
+
+    profile_mode_note = (
+        "You are interviewing for a senior AI engineer role. Ask technically deep, implementation-focused questions quickly."
+        if ACTIVE_PROFILE == "ai-tech-zh"
+        else "You are interviewing for college admissions. Ask concise evidence-based questions."
+    )
 
     prompt = f"""
-You are an adaptive college admissions interviewer.
+You are an adaptive interviewer.
+{profile_mode_note}
 
 Use these policy docs:
 --- SKILL.md ---
@@ -389,10 +397,14 @@ Use these policy docs:
 {RUBRIC_TEXT[:12000]}
 
 Current interview state:
+- profile: {ACTIVE_PROFILE}
 - turn_count: {state["turn_count"]}
 - max_turns: {MAX_TURNS}
 - coverage_json: {json.dumps(state["coverage"], ensure_ascii=False)}
 - recent_questions: {json.dumps(recent_questions, ensure_ascii=False)}
+
+Resume (if provided):
+{resume_text if resume_text else '(none)'}
 
 Transcript:
 {tr[-12000:]}
@@ -403,11 +415,13 @@ Latest candidate answer:
 Task:
 1) Update coverage based on transcript evidence.
 2) Ask exactly ONE high-value next question.
-3) Prioritize uncovered/weak categories.
-4) If candidate made vague/inflated claims, ask for concrete verification.
-5) Keep the question short: <= 18 words, no preamble, no two-part question.
-6) Do NOT repeat or paraphrase any question in recent_questions.
-7) Make interview fast: move forward when a category already has enough evidence.
+3) Use resume claims to ask verification/depth questions (metrics, architecture, tradeoffs, failures).
+4) Prioritize uncovered/weak categories.
+5) If candidate made vague/inflated claims, ask for concrete verification.
+6) Keep question short: <= 18 words, no preamble, no two-part question.
+7) Do NOT repeat or paraphrase any question in recent_questions.
+8) Make interview fast: move forward when a category already has enough evidence.
+9) For ai-tech-zh profile, prefer technical AI topics first (memory, eval, agent reliability, tuning).
 
 Return STRICT JSON only:
 {{
