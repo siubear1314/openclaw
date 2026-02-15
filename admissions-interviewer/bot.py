@@ -460,6 +460,16 @@ async def start_interview(interaction: discord.Interaction, candidate_id: str, c
             f"Created thread {created_thread.mention} for **{candidate_id}**.{invited_msg} Continue interview there.",
             ephemeral=False
         )
+
+        # Extra reliable notification in parent channel with thread link
+        if candidate is not None:
+            try:
+                await interaction.followup.send(
+                    f"{candidate.mention} your interview is ready here: {created_thread.mention}",
+                    ephemeral=False
+                )
+            except Exception:
+                pass
     else:
         fallback_msg = f"Interview started for **{candidate_id}** (thread creation unavailable)."
         if candidate is not None:
