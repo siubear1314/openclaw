@@ -40,7 +40,7 @@ if [ ! -d ".venv" ]; then
 fi
 
 source .venv/bin/activate
-pip install -U discord.py openai >/dev/null
+pip install -U discord.py openai requests >/dev/null
 
 set -a
 source .env
