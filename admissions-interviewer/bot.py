@@ -24,15 +24,24 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # fast + cheap default
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")  # optional web search for candidate questions
 
-# IMPORTANT: update if your paths differ
-SKILL_PATH = os.getenv(
-    "SKILL_PATH",
-    "/Users/rosanna/.openclaw/workspace/admissions-interviewer/SKILL.md"
-)
-RUBRIC_PATH = os.getenv(
-    "RUBRIC_PATH",
-    "/Users/rosanna/.openclaw/workspace/admissions-interviewer/references/rubric.md"
-)
+# Profile paths (switchable at runtime)
+ADMISSIONS_SKILL_PATH = "/Users/rosanna/.openclaw/workspace/admissions-interviewer/SKILL.md"
+ADMISSIONS_RUBRIC_PATH = "/Users/rosanna/.openclaw/workspace/admissions-interviewer/references/rubric.md"
+AI_TECH_ZH_SKILL_PATH = "/Users/rosanna/.openclaw/workspace/ai-technical-interviewer-zh/SKILL.md"
+AI_TECH_ZH_RUBRIC_PATH = "/Users/rosanna/.openclaw/workspace/ai-technical-interviewer-zh/references/rubric.md"
+
+PROFILE_MAP = {
+    "admissions": {
+        "skill": ADMISSIONS_SKILL_PATH,
+        "rubric": ADMISSIONS_RUBRIC_PATH,
+    },
+    "ai-tech-zh": {
+        "skill": AI_TECH_ZH_SKILL_PATH,
+        "rubric": AI_TECH_ZH_RUBRIC_PATH,
+    },
+}
+
+DEFAULT_PROFILE = os.getenv("INTERVIEW_PROFILE", "admissions")
 
 MAX_TURNS = 20
 TARGET_CATEGORIES = [
@@ -261,8 +270,22 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-SKILL_TEXT = read_file_safe(SKILL_PATH, fallback="(SKILL.md not found)")
-RUBRIC_TEXT = read_file_safe(RUBRIC_PATH, fallback="(rubric.md not found)")
+ACTIVE_PROFILE = DEFAULT_PROFILE if DEFAULT_PROFILE in PROFILE_MAP else "admissions"
+ACTIVE_SKILL_PATH = PROFILE_MAP[ACTIVE_PROFILE]["skill"]
+ACTIVE_RUBRIC_PATH = PROFILE_MAP[ACTIVE_PROFILE]["rubric"]
+SKILL_TEXT = read_file_safe(ACTIVE_SKILL_PATH, fallback="(SKILL.md not found)")
+RUBRIC_TEXT = read_file_safe(ACTIVE_RUBRIC_PATH, fallback="(rubric.md not found)")
+
+def set_active_profile(profile: str) -> bool:
+    global ACTIVE_PROFILE, ACTIVE_SKILL_PATH, ACTIVE_RUBRIC_PATH, SKILL_TEXT, RUBRIC_TEXT
+    if profile not in PROFILE_MAP:
+        return False
+    ACTIVE_PROFILE = profile
+    ACTIVE_SKILL_PATH = PROFILE_MAP[profile]["skill"]
+    ACTIVE_RUBRIC_PATH = PROFILE_MAP[profile]["rubric"]
+    SKILL_TEXT = read_file_safe(ACTIVE_SKILL_PATH, fallback="(SKILL.md not found)")
+    RUBRIC_TEXT = read_file_safe(ACTIVE_RUBRIC_PATH, fallback="(rubric.md not found)")
+    return True
 
 def safe_json_parse(text: str) -> Dict[str, Any]:
     text = text.strip()
@@ -495,6 +518,7 @@ tree = bot.tree
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    print(f"Active profile: {ACTIVE_PROFILE} | skill={ACTIVE_SKILL_PATH} | rubric={ACTIVE_RUBRIC_PATH}")
     if GUILD_ID:
         guild = discord.Object(id=GUILD_ID)
         tree.copy_global_to(guild=guild)
@@ -507,6 +531,28 @@ async def on_ready():
 # --------------------------
 # Slash commands
 # --------------------------
+
+@tree.command(name="set_profile", description="Switch interviewer profile")
+@app_commands.describe(profile="admissions or ai-tech-zh")
+@app_commands.choices(profile=[
+    app_commands.Choice(name="admissions", value="admissions"),
+    app_commands.Choice(name="ai-tech-zh", value="ai-tech-zh"),
+])
+async def set_profile(interaction: discord.Interaction, profile: app_commands.Choice[str]):
+    ok = set_active_profile(profile.value)
+    if not ok:
+        await interaction.response.send_message("Invalid profile.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        f"Profile switched to **{ACTIVE_PROFILE}**.\nSkill: `{ACTIVE_SKILL_PATH}`\nRubric: `{ACTIVE_RUBRIC_PATH}`"
+    )
+
+@tree.command(name="show_profile", description="Show current interviewer profile")
+async def show_profile(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"Current profile: **{ACTIVE_PROFILE}**\nSkill: `{ACTIVE_SKILL_PATH}`\nRubric: `{ACTIVE_RUBRIC_PATH}`",
+        ephemeral=True
+    )
 
 @tree.command(name="start_interview", description="Start an adaptive interview session")
 @app_commands.describe(candidate_id="e.g., ETHANLAM", candidate="Optional: candidate user to invite into thread", private_thread="Create private thread and invite candidate")
