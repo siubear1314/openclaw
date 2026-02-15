@@ -399,8 +399,8 @@ async def on_ready():
 # --------------------------
 
 @tree.command(name="start_interview", description="Start an adaptive interview session")
-@app_commands.describe(candidate_id="e.g., ETHANLAM")
-async def start_interview(interaction: discord.Interaction, candidate_id: str):
+@app_commands.describe(candidate_id="e.g., ETHANLAM", candidate="Optional: candidate user to invite into thread")
+async def start_interview(interaction: discord.Interaction, candidate_id: str, candidate: Optional[discord.Member] = None):
     active = get_active_session(interaction.channel_id)
     if active:
         await interaction.response.send_message(
@@ -442,15 +442,30 @@ async def start_interview(interaction: discord.Interaction, candidate_id: str):
     add_message(session_id, "interviewer", OPENING_QUESTION)
 
     if created_thread:
-        await created_thread.send(f"Interview started for **{candidate_id}**.\n\n**Q1:** {OPENING_QUESTION}")
+        invited_msg = ""
+        if candidate is not None:
+            try:
+                await created_thread.add_user(candidate)
+                invited_msg = f" Invited {candidate.mention} to the thread."
+            except Exception:
+                invited_msg = f" Could not auto-invite {candidate.mention}; add them manually from thread members."
+
+        kickoff = f"Interview started for **{candidate_id}**."
+        if candidate is not None:
+            kickoff += f" {candidate.mention}"
+        kickoff += f"\n\n**Q1:** {OPENING_QUESTION}"
+
+        await created_thread.send(kickoff)
         await interaction.response.send_message(
-            f"Created thread {created_thread.mention} for **{candidate_id}**. Continue interview there.",
+            f"Created thread {created_thread.mention} for **{candidate_id}**.{invited_msg} Continue interview there.",
             ephemeral=False
         )
     else:
-        await interaction.response.send_message(
-            f"Interview started for **{candidate_id}** (thread creation unavailable).\n\n**Q1:** {OPENING_QUESTION}"
-        )
+        fallback_msg = f"Interview started for **{candidate_id}** (thread creation unavailable)."
+        if candidate is not None:
+            fallback_msg += f" Please interview with {candidate.mention} in this channel."
+        fallback_msg += f"\n\n**Q1:** {OPENING_QUESTION}"
+        await interaction.response.send_message(fallback_msg)
 
 @tree.command(name="set_resume", description="Attach candidate resume text to active interview")
 @app_commands.describe(resume="Paste full resume text")
