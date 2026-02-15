@@ -509,8 +509,13 @@ async def on_ready():
 # --------------------------
 
 @tree.command(name="start_interview", description="Start an adaptive interview session")
-@app_commands.describe(candidate_id="e.g., ETHANLAM", candidate="Optional: candidate user to invite into thread")
-async def start_interview(interaction: discord.Interaction, candidate_id: str, candidate: Optional[discord.Member] = None):
+@app_commands.describe(candidate_id="e.g., ETHANLAM", candidate="Optional: candidate user to invite into thread", private_thread="Create private thread and invite candidate")
+async def start_interview(
+    interaction: discord.Interaction,
+    candidate_id: str,
+    candidate: Optional[discord.Member] = None,
+    private_thread: bool = False,
+):
     active = get_active_session(interaction.channel_id)
     if active:
         await interaction.response.send_message(
@@ -528,6 +533,7 @@ async def start_interview(interaction: discord.Interaction, candidate_id: str, c
             created_thread = await interaction.channel.create_thread(
                 name=thread_name,
                 auto_archive_duration=1440,
+                type=discord.ChannelType.private_thread if private_thread else discord.ChannelType.public_thread,
                 reason=f"Admissions interview for {candidate_id}"
             )
             # discord.py returns ThreadWithMessage in some versions
@@ -553,12 +559,16 @@ async def start_interview(interaction: discord.Interaction, candidate_id: str, c
 
     if created_thread:
         invited_msg = ""
+        if private_thread and candidate is None:
+            invited_msg = " Private thread created without candidate; add members manually."
+
         if candidate is not None:
             try:
                 await created_thread.add_user(candidate)
                 invited_msg = f" Invited {candidate.mention} to the thread."
             except Exception:
-                invited_msg = f" Could not auto-invite {candidate.mention}; add them manually from thread members."
+                # keep working even if invite fails
+                invited_msg = f" Could not auto-invite {candidate.mention}; check channel/thread permissions."
 
         kickoff = f"Interview started for **{candidate_id}**."
         if candidate is not None:
@@ -566,16 +576,19 @@ async def start_interview(interaction: discord.Interaction, candidate_id: str, c
         kickoff += f"\n\n**Q1:** {OPENING_QUESTION}"
 
         await created_thread.send(kickoff)
+
+        guild_id = interaction.guild_id or 0
+        thread_url = f"https://discord.com/channels/{guild_id}/{created_thread.id}"
         await interaction.response.send_message(
-            f"Created thread {created_thread.mention} for **{candidate_id}**.{invited_msg} Continue interview there.",
+            f"Created {'private' if private_thread else 'public'} thread {created_thread.mention} for **{candidate_id}**.{invited_msg} Continue interview there.\nThread link: {thread_url}",
             ephemeral=False
         )
 
-        # Extra reliable notification in parent channel with thread link
+        # Extra reliable notification in parent channel with direct URL
         if candidate is not None:
             try:
                 await interaction.followup.send(
-                    f"{candidate.mention} your interview is ready here: {created_thread.mention}",
+                    f"{candidate.mention} your interview is ready: {thread_url}",
                     ephemeral=False
                 )
             except Exception:
