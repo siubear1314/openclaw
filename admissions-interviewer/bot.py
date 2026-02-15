@@ -123,6 +123,22 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS answer_assessments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        question_text TEXT,
+        answer_text TEXT NOT NULL,
+        quality_score INTEGER,
+        correctness TEXT,
+        reasoning TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(id),
+        FOREIGN KEY(message_id) REFERENCES messages(id)
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -161,8 +177,10 @@ def add_message(session_id: int, role: str, content: str, author_id: Optional[st
       INSERT INTO messages(session_id, role, author_id, content, created_at)
       VALUES (?, ?, ?, ?, ?)
     """, (session_id, role, author_id, content, now_iso()))
+    msg_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return msg_id
 
 def fetch_transcript_rows(session_id: int):
     conn = db()
@@ -180,6 +198,57 @@ def fetch_transcript_rows(session_id: int):
 def transcript_text(session_id: int) -> str:
     rows = fetch_transcript_rows(session_id)
     return "\n".join([f"[{r[3]}] {r[0].upper()}: {r[2]}" for r in rows])
+
+def get_last_interviewer_question(session_id: int) -> str:
+    rows = fetch_transcript_rows(session_id)
+    for role, _author_id, content, _created_at in reversed(rows):
+        if role == "interviewer" and content.strip().endswith("?"):
+            return content.strip()
+    for role, _author_id, content, _created_at in reversed(rows):
+        if role == "interviewer" and content.strip():
+            return content.strip()
+    return ""
+
+def save_answer_assessment(session_id: int, message_id: int, question_text: str, answer_text: str, assessment: Dict[str, Any]):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO answer_assessments(session_id, message_id, question_text, answer_text, quality_score, correctness, reasoning, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            message_id,
+            question_text,
+            answer_text,
+            int(assessment.get("quality_score", 0) or 0),
+            str(assessment.get("correctness", "unclear")),
+            str(assessment.get("reasoning", "")),
+            now_iso(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+def get_latest_assessment(session_id: int) -> Dict[str, Any]:
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT quality_score, correctness, reasoning
+        FROM answer_assessments
+        WHERE session_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    return {"quality_score": row[0], "correctness": row[1], "reasoning": row[2]}
 
 def default_coverage():
     return {k: {"covered": False, "evidence_count": 0} for k in TARGET_CATEGORIES}
@@ -374,10 +443,61 @@ Optional web search snippets:
     except Exception:
         return "Good question. I can’t verify that right now, but I’ll note it and we can revisit at the end."
 
+def assess_candidate_answer(session_id: int, question_text: str, answer_text: str) -> Dict[str, Any]:
+    tr = transcript_text(session_id)
+    state = get_or_create_state(session_id)
+    prompt = f"""
+You are grading a candidate answer during an interview.
+Profile: {ACTIVE_PROFILE}
+
+Use rubric policy excerpts:
+--- SKILL.md ---
+{SKILL_TEXT[:5000]}
+--- rubric.md ---
+{RUBRIC_TEXT[:5000]}
+
+Question asked:
+{question_text}
+
+Candidate answer:
+{answer_text}
+
+Recent context:
+{tr[-3000:]}
+
+Return STRICT JSON only:
+{{
+  "quality_score": 1,
+  "correctness": "correct|partially_correct|incorrect|unclear",
+  "reasoning": "one short sentence"
+}}
+Scoring guidance:
+- quality_score 1-5 (1 poor, 5 excellent)
+- correctness judges factual/technical correctness vs question intent
+- if insufficient evidence, use "unclear"
+"""
+    try:
+        resp = client.responses.create(model=OPENAI_MODEL, input=prompt, temperature=0.1)
+        data = safe_json_parse(resp.output_text)
+        q = int(data.get("quality_score", 0) or 0)
+        if q < 1 or q > 5:
+            q = max(1, min(5, q or 3))
+        c = str(data.get("correctness", "unclear"))
+        if c not in {"correct", "partially_correct", "incorrect", "unclear"}:
+            c = "unclear"
+        return {
+            "quality_score": q,
+            "correctness": c,
+            "reasoning": str(data.get("reasoning", ""))[:240],
+        }
+    except Exception:
+        return {"quality_score": 3, "correctness": "unclear", "reasoning": "Auto-grading unavailable; treated as unclear."}
+
 def generate_next_question(session_id: int, latest_candidate_answer: str) -> str:
     state = get_or_create_state(session_id)
     tr = transcript_text(session_id)
     recent_questions = get_recent_interviewer_questions(session_id)
+    latest_assessment = get_latest_assessment(session_id)
     resume_text = (state.get("resume_text") or "")[:8000]
 
     profile_mode_note = (
@@ -402,6 +522,7 @@ Current interview state:
 - max_turns: {MAX_TURNS}
 - coverage_json: {json.dumps(state["coverage"], ensure_ascii=False)}
 - recent_questions: {json.dumps(recent_questions, ensure_ascii=False)}
+- latest_answer_assessment: {json.dumps(latest_assessment, ensure_ascii=False)}
 
 Resume (if provided):
 {resume_text if resume_text else '(none)'}
@@ -422,6 +543,7 @@ Task:
 7) Do NOT repeat or paraphrase any question in recent_questions.
 8) Make interview fast: move forward when a category already has enough evidence.
 9) For ai-tech-zh profile, prefer technical AI topics first (memory, eval, agent reliability, tuning).
+10) If latest_answer_assessment.correctness is incorrect/unclear, ask a corrective follow-up immediately.
 
 Return STRICT JSON only:
 {{
@@ -767,13 +889,21 @@ async def on_message(message: discord.Message):
         session_id, candidate_id, _ = active
 
         # Save candidate message
-        add_message(session_id, "candidate", message.content, str(message.author.id))
+        candidate_msg_id = add_message(session_id, "candidate", message.content, str(message.author.id))
 
         # If candidate asks a question, answer briefly (optionally with web search), then continue interview.
         if candidate_asked_question(message.content):
             answer = answer_candidate_question(message.content, session_id)
             add_message(session_id, "interviewer", answer)
             await message.channel.send(answer)
+
+        # Grade latest candidate answer for quality/correctness
+        try:
+            last_q = get_last_interviewer_question(session_id)
+            assessment = assess_candidate_answer(session_id, last_q, message.content)
+            save_answer_assessment(session_id, candidate_msg_id, last_q, message.content, assessment)
+        except Exception:
+            pass
 
         # Generate next question adaptively
         st = get_or_create_state(session_id)
