@@ -24,6 +24,11 @@ The skill scores candidates across core dimensions (communication, motivation, r
 3. Optionally provide interviewer notes.
 4. Run evaluation and review output with a human admissions committee.
 
+## Optional web search for candidate questions
+
+If candidates ask technical/process questions mid-interview, the bot can answer briefly and continue.
+Set `BRAVE_API_KEY` in `.env` to enable live web search support.
+
 ## Important
 
 This is a decision-support tool, not an autonomous admissions decision-maker.

@@ -3,6 +3,9 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+from urllib.parse import quote_plus
+
+import requests
 
 import discord
 from discord import app_commands
@@ -19,6 +22,7 @@ DB_PATH = os.getenv("DB_PATH", "interviews.db")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # fast + cheap default
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")  # optional web search for candidate questions
 
 # IMPORTANT: update if your paths differ
 SKILL_PATH = os.getenv(
@@ -279,6 +283,52 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
             except Exception:
                 continue
     raise ValueError(f"Could not parse JSON from model output:\n{text[:500]}")
+
+def candidate_asked_question(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return "?" in t or t.startswith("can ") or t.startswith("could ") or t.startswith("what ") or t.startswith("how ")
+
+def brave_search(query: str, count: int = 3) -> str:
+    if not BRAVE_API_KEY:
+        return ""
+    try:
+        url = f"https://api.search.brave.com/res/v1/web/search?q={quote_plus(query)}&count={count}"
+        headers = {"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY}
+        r = requests.get(url, headers=headers, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+        results = (data.get("web", {}) or {}).get("results", [])[:count]
+        lines = []
+        for it in results:
+            title = it.get("title", "")
+            desc = it.get("description", "")
+            url = it.get("url", "")
+            lines.append(f"- {title}: {desc} ({url})")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+def answer_candidate_question(question: str, session_id: int) -> str:
+    tr = transcript_text(session_id)
+    snippets = brave_search(question)
+    prompt = f"""
+You are the interviewer. Candidate asked a question during interview.
+Reply in <= 80 words, clear and practical. If unsure, say so.
+
+Candidate question:
+{question}
+
+Interview context:
+{tr[-4000:]}
+
+Optional web search snippets:
+{snippets if snippets else '(none)'}
+"""
+    try:
+        resp = client.responses.create(model=OPENAI_MODEL, input=prompt, temperature=0.2)
+        return (resp.output_text or "Good question. I’ll note it and we can revisit at the end.").strip()
+    except Exception:
+        return "Good question. I can’t verify that right now, but I’ll note it and we can revisit at the end."
 
 def generate_next_question(session_id: int, latest_candidate_answer: str) -> str:
     state = get_or_create_state(session_id)
@@ -622,8 +672,14 @@ async def on_message(message: discord.Message):
     if active:
         session_id, candidate_id, _ = active
 
-        # Save candidate answer
+        # Save candidate message
         add_message(session_id, "candidate", message.content, str(message.author.id))
+
+        # If candidate asks a question, answer briefly (optionally with web search), then continue interview.
+        if candidate_asked_question(message.content):
+            answer = answer_candidate_question(message.content, session_id)
+            add_message(session_id, "interviewer", answer)
+            await message.channel.send(answer)
 
         # Generate next question adaptively
         st = get_or_create_state(session_id)
@@ -635,7 +691,7 @@ async def on_message(message: discord.Message):
             try:
                 question = generate_next_question(session_id, message.content)
             except Exception:
-                question = "Thanks. Can you give a concrete example with your exact role, actions, and measurable outcome?"
+                question = "Give one concrete example with your exact actions and measurable impact."
 
             add_message(session_id, "interviewer", question)
             await message.channel.send(question)
