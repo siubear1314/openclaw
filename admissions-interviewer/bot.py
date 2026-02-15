@@ -56,6 +56,11 @@ TARGET_CATEGORIES = [
 OPENING_QUESTION = (
     "Thanks for joining today. To start, tell me about yourself and why you're interested in this program."
 )
+OPENING_QUESTION_ZH = "你好，我们开始技术面试。请先介绍你最近做过的一个AI项目，并说明你的核心贡献。"
+
+
+def get_opening_question() -> str:
+    return OPENING_QUESTION_ZH if ACTIVE_PROFILE == "ai-tech-zh" else OPENING_QUESTION
 
 # ============================================================
 # Utilities
@@ -318,6 +323,9 @@ def is_similar_question(a: str, b: str) -> bool:
     return overlap >= 0.65
 
 def fallback_question_for_coverage(coverage: Dict[str, Any]) -> str:
+    if ACTIVE_PROFILE == "ai-tech-zh":
+        return "请用一个线上案例说明你如何设计长期记忆写入、检索与纠错。"
+
     if not coverage.get("motivation_purpose", {}).get("covered"):
         return "What specifically about this program matches your goals, and why?"
     if not coverage.get("academic_program_fit", {}).get("covered"):
@@ -424,9 +432,11 @@ def brave_search(query: str, count: int = 3) -> str:
 def answer_candidate_question(question: str, session_id: int) -> str:
     tr = transcript_text(session_id)
     snippets = brave_search(question)
+    lang_rule = "Reply only in Simplified Chinese (简体中文)." if ACTIVE_PROFILE == "ai-tech-zh" else "Reply in English."
     prompt = f"""
 You are the interviewer. Candidate asked a question during interview.
 Reply in <= 80 words, clear and practical. If unsure, say so.
+{lang_rule}
 
 Candidate question:
 {question}
@@ -501,7 +511,7 @@ def generate_next_question(session_id: int, latest_candidate_answer: str) -> str
     resume_text = (state.get("resume_text") or "")[:8000]
 
     profile_mode_note = (
-        "You are interviewing for a senior AI engineer role. Ask technically deep, implementation-focused questions quickly."
+        "You are interviewing for a senior AI engineer role. Ask technically deep, implementation-focused questions quickly. Reply ONLY in Simplified Chinese (简体中文)."
         if ACTIVE_PROFILE == "ai-tech-zh"
         else "You are interviewing for college admissions. Ask concise evidence-based questions."
     )
@@ -572,7 +582,8 @@ Return STRICT JSON only:
     turn_count = state["turn_count"] + 1
     save_state(session_id, state["resume_text"], turn_count, coverage)
 
-    question = data.get("question", "Give one concrete example with your actions and measurable impact.")
+    default_q = "请给出一个包含你的动作、指标和结果的具体案例。" if ACTIVE_PROFILE == "ai-tech-zh" else "Give one concrete example with your actions and measurable impact."
+    question = data.get("question", default_q)
     if any(is_similar_question(question, q) for q in recent_questions):
         question = fallback_question_for_coverage(coverage)
     return question
@@ -736,8 +747,9 @@ async def start_interview(
     conn.commit()
     conn.close()
 
+    opening_question = get_opening_question()
     _ = get_or_create_state(session_id)
-    add_message(session_id, "interviewer", OPENING_QUESTION)
+    add_message(session_id, "interviewer", opening_question)
 
     if created_thread:
         invited_msg = ""
@@ -755,7 +767,7 @@ async def start_interview(
         kickoff = f"Interview started for **{candidate_id}**."
         if candidate is not None:
             kickoff += f" {candidate.mention}"
-        kickoff += f"\n\n**Q1:** {OPENING_QUESTION}"
+        kickoff += f"\n\n**Q1:** {opening_question}"
 
         await created_thread.send(kickoff)
 
@@ -779,7 +791,7 @@ async def start_interview(
         fallback_msg = f"Interview started for **{candidate_id}** (thread creation unavailable)."
         if candidate is not None:
             fallback_msg += f" Please interview with {candidate.mention} in this channel."
-        fallback_msg += f"\n\n**Q1:** {OPENING_QUESTION}"
+        fallback_msg += f"\n\n**Q1:** {opening_question}"
         await interaction.response.send_message(fallback_msg)
 
 @tree.command(name="set_resume", description="Attach candidate resume text to active interview")
@@ -908,14 +920,13 @@ async def on_message(message: discord.Message):
         # Generate next question adaptively
         st = get_or_create_state(session_id)
         if st["turn_count"] >= MAX_TURNS or enough_coverage(st["coverage"]):
-            await message.channel.send(
-                "Thanks — we now have enough evidence. Please run `/end_interview`, then `/evaluate`."
-            )
+            done_msg = "我们已经收集到足够证据。请运行 `/end_interview`，然后 `/evaluate`。" if ACTIVE_PROFILE == "ai-tech-zh" else "Thanks — we now have enough evidence. Please run `/end_interview`, then `/evaluate`."
+            await message.channel.send(done_msg)
         else:
             try:
                 question = generate_next_question(session_id, message.content)
             except Exception:
-                question = "Give one concrete example with your exact actions and measurable impact."
+                question = "请给出一个包含你的具体动作、指标和结果的案例。" if ACTIVE_PROFILE == "ai-tech-zh" else "Give one concrete example with your exact actions and measurable impact."
 
             add_message(session_id, "interviewer", question)
             await message.channel.send(question)
