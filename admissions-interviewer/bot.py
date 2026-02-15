@@ -30,7 +30,7 @@ RUBRIC_PATH = os.getenv(
     "/Users/rosanna/.openclaw/workspace/admissions-interviewer/references/rubric.md"
 )
 
-MAX_TURNS = 10
+MAX_TURNS = 20
 TARGET_CATEGORIES = [
     "communication_clarity",
     "motivation_purpose",
@@ -213,7 +213,40 @@ def enough_coverage(coverage: Dict[str, Any]) -> bool:
     covered_count = sum(
         1 for k in TARGET_CATEGORIES if coverage.get(k, {}).get("covered") is True
     )
-    return covered_count >= 5
+    return covered_count >= 6
+
+def get_recent_interviewer_questions(session_id: int, limit: int = 8):
+    rows = fetch_transcript_rows(session_id)
+    qs = [r[2].strip() for r in rows if r[0] == "interviewer" and r[2].strip()]
+    return qs[-limit:]
+
+def _norm_text(s: str) -> str:
+    return "".join(ch.lower() for ch in s if ch.isalnum() or ch.isspace()).strip()
+
+def is_similar_question(a: str, b: str) -> bool:
+    a_n, b_n = _norm_text(a), _norm_text(b)
+    if not a_n or not b_n:
+        return False
+    if a_n in b_n or b_n in a_n:
+        return True
+    a_set, b_set = set(a_n.split()), set(b_n.split())
+    if not a_set or not b_set:
+        return False
+    overlap = len(a_set & b_set) / max(1, len(a_set | b_set))
+    return overlap >= 0.65
+
+def fallback_question_for_coverage(coverage: Dict[str, Any]) -> str:
+    if not coverage.get("motivation_purpose", {}).get("covered"):
+        return "What specifically about this program matches your goals, and why?"
+    if not coverage.get("academic_program_fit", {}).get("covered"):
+        return "Which course or faculty fit you best, and what preparation proves you can succeed?"
+    if not coverage.get("leadership_initiative", {}).get("covered"):
+        return "Describe one leadership example with your exact actions and measurable impact."
+    if not coverage.get("self_awareness_reflection", {}).get("covered"):
+        return "Tell me about a failure, what you changed, and the concrete result after that change."
+    if not coverage.get("integrity_professionalism", {}).get("covered"):
+        return "Describe a time you faced an ethical choice and how you made the decision."
+    return "Give one concrete example that best shows why we should admit you." 
 
 # ============================================================
 # OpenAI helpers
@@ -250,6 +283,7 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
 def generate_next_question(session_id: int, latest_candidate_answer: str) -> str:
     state = get_or_create_state(session_id)
     tr = transcript_text(session_id)
+    recent_questions = get_recent_interviewer_questions(session_id)
 
     prompt = f"""
 You are an adaptive college admissions interviewer.
@@ -264,6 +298,7 @@ Current interview state:
 - turn_count: {state["turn_count"]}
 - max_turns: {MAX_TURNS}
 - coverage_json: {json.dumps(state["coverage"], ensure_ascii=False)}
+- recent_questions: {json.dumps(recent_questions, ensure_ascii=False)}
 
 Transcript:
 {tr[-12000:]}
@@ -276,7 +311,9 @@ Task:
 2) Ask exactly ONE high-value next question.
 3) Prioritize uncovered/weak categories.
 4) If candidate made vague/inflated claims, ask for concrete verification.
-5) Keep question concise and natural.
+5) Keep the question short: <= 18 words, no preamble, no two-part question.
+6) Do NOT repeat or paraphrase any question in recent_questions.
+7) Make interview fast: move forward when a category already has enough evidence.
 
 Return STRICT JSON only:
 {{
@@ -296,7 +333,7 @@ Return STRICT JSON only:
     resp = client.responses.create(
         model=OPENAI_MODEL,
         input=prompt,
-        temperature=0.4
+        temperature=0.2
     )
     out = resp.output_text
     data = safe_json_parse(out)
@@ -305,7 +342,9 @@ Return STRICT JSON only:
     turn_count = state["turn_count"] + 1
     save_state(session_id, state["resume_text"], turn_count, coverage)
 
-    question = data.get("question", "Can you expand on that with a specific example?")
+    question = data.get("question", "Give one concrete example with your actions and measurable impact.")
+    if any(is_similar_question(question, q) for q in recent_questions):
+        question = fallback_question_for_coverage(coverage)
     return question
 
 def run_final_evaluation(session_id: int, candidate_id: str) -> Dict[str, Any]:
