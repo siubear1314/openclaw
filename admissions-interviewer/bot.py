@@ -286,7 +286,28 @@ def safe_json_parse(text: str) -> Dict[str, Any]:
 
 def candidate_asked_question(text: str) -> bool:
     t = (text or "").strip().lower()
-    return "?" in t or t.startswith("can ") or t.startswith("could ") or t.startswith("what ") or t.startswith("how ")
+    if not t:
+        return False
+
+    # Strong explicit markers
+    if t.startswith("question:") or t.startswith("q:"):
+        return True
+    if "i have a question" in t or "can i ask" in t or "quick question" in t:
+        return True
+
+    # Ends with question mark and not too long (avoids classifying long answers with one '?')
+    if t.endswith("?") and len(t.split()) <= 28:
+        return True
+
+    # Interrogative start with short sentence only
+    interrogatives = (
+        "can ", "could ", "would ", "will ", "what ", "how ", "why ",
+        "when ", "where ", "which ", "is ", "are ", "do ", "does ", "did "
+    )
+    if t.startswith(interrogatives) and len(t.split()) <= 24:
+        return True
+
+    return False
 
 def brave_search(query: str, count: int = 3) -> str:
     if not BRAVE_API_KEY:
